@@ -223,21 +223,19 @@ def trt_infer(trt_path, feature_tensors, batch_size=64):
     hypotheses = ctc_decoder.post_process_predictions([predictions], vocab)
     return hypotheses
 
-
-
-
 @profile
 def main():
-    onnx_path = sys.argv[1]
-    mode = 'fp16'
-    trt_path = build_trt_engine(onnx_path, mode)
+    #onnx_path = sys.argv[1]
+    #mode = 'fp16'
+    #trt_path = build_trt_engine(onnx_path, mode)
+    trt_path = sys.argv[1]
     model_args = [
         '--model_config', 'examples/asr/configs/quartznet15x5.yaml',
         '--load_dir', 'model/english/',
         '--lm_path', './language-model/english_4gram_1.2.binary',
         '--eval_batch_size', '1',
         '--beam_width', '64',
-        '--amp_opt_level', 'O1'
+        # '--amp_opt_level', 'O1'
     ]
     parser = get_parser()
     args = parser.parse_args(model_args)

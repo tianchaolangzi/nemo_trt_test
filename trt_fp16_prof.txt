@@ -1,0 +1,118 @@
+Timer unit: 1e-06 s
+
+Total time: 4.91099 s
+File: trt_infer_batch.py
+Function: get_features at line 155
+
+Line #      Hits         Time  Per Hit   % Time  Line Contents
+==============================================================
+   155                                               @profile
+   156                                               def get_features(self, json_file, wav_path=None):
+   157         2     566702.0 283351.0     11.5          eval_data_layer = nemo_asr.AudioToTextDataLayer(
+   158         1          1.0      1.0      0.0              manifest_filepath=json_file,
+   159         1          1.0      1.0      0.0              labels=self.vocab,
+   160         1          1.0      1.0      0.0              batch_size=64,
+   161         1          1.0      1.0      0.0              sample_rate=self.sample_rate,
+   162         1          0.0      0.0      0.0              shuffle=False
+   163                                                   )
+   164         1        776.0    776.0      0.0          audio_signal_e1, a_sig_length_e1, transcript_e1, transcript_len_e1 = eval_data_layer()
+   165         2        665.0    332.5      0.0          processed_signal_e1, p_length_e1 = self.data_preprocessor(
+   166         1          1.0      1.0      0.0              input_signal=audio_signal_e1, length=a_sig_length_e1)
+   167         3    3961031.0 1320343.7     80.7          feature_tensors = self.neural_factory.infer(
+   168         2          3.0      1.5      0.0              tensors=[processed_signal_e1])[0]
+   169                                                   
+   170        48         49.0      1.0      0.0          for i in range(len(feature_tensors)):
+   171        47     149013.0   3170.5      3.0              tmp_tensor = torch.zeros((feature_tensors[i].shape[0], 64, 1600))
+   172        47      20962.0    446.0      0.4              tmp_tensor[:, :, :feature_tensors[i].shape[2]] += feature_tensors[i]
+   173        47        164.0      3.5      0.0              feature_tensors[i] = tmp_tensor
+   174         1     211613.0 211613.0      4.3          feature_tensors = torch.cat(feature_tensors, dim=0)
+   175         1          3.0      3.0      0.0          return feature_tensors
+
+Total time: 30.1257 s
+File: trt_infer_batch.py
+Function: trt_infer at line 178
+
+Line #      Hits         Time  Per Hit   % Time  Line Contents
+==============================================================
+   178                                           @profile
+   179                                           def trt_infer(trt_path, feature_tensors, batch_size=64):
+   180         1         40.0     40.0      0.0      stream = cuda.Stream()
+   181         1         43.0     43.0      0.0      f = open(trt_path, "rb") 
+   182         1   12028953.0 12028953.0     39.9      runtime = trt.Runtime(TRT_LOGGER) 
+   183         1     288767.0 288767.0      1.0      trt_engine = runtime.deserialize_cuda_engine(f.read())
+   184         1       3968.0   3968.0      0.0      trt_ctx = trt_engine.create_execution_context() # 创建context用来执行推断
+   185                                               
+   186         1         26.0     26.0      0.0      profile_shape = trt_engine.get_profile_shape(profile_index=0, binding=0)
+   187         1          2.0      2.0      0.0      max_input_shape = profile_shape[2]
+   188         1          1.0      1.0      0.0      max_output_shape = [
+   189         1          6.0      6.0      0.0              max_input_shape[0], vocabulary_size,
+   190         1          3.0      3.0      0.0              (max_input_shape[-1] + 1) // 2
+   191                                                   ]
+   192         1         28.0     28.0      0.0      output_nbytes = trt.volume(max_output_shape) * trt.float32.itemsize
+   193         1        151.0    151.0      0.0      d_output = cuda.mem_alloc(output_nbytes)
+   194                                           
+   195         1          1.0      1.0      0.0      predictions = []
+   196        48        123.0      2.6      0.0      for step in range(feature_tensors.shape[0] // batch_size + 1):
+   197        47        125.0      2.7      0.0          if (step+1)*batch_size < feature_tensors.shape[0]:
+   198        46        545.0     11.8      0.0              input_features = feature_tensors[step*batch_size:(step+1)*batch_size]
+   199                                                   else:
+   200         1         11.0     11.0      0.0              input_features = feature_tensors[step*batch_size:]
+   201                                           
+   202        47       1221.0     26.0      0.0          input_nbytes = trt.volume(input_features.shape) * trt.float32.itemsize
+   203        47      22065.0    469.5      0.1          d_input = cuda.mem_alloc(input_nbytes)
+   204                                           
+   205        47       1269.0     27.0      0.0          trt_ctx.set_binding_shape(0, input_features.shape)
+   206        47        159.0      3.4      0.0          assert trt_ctx.all_binding_shapes_specified
+   207                                           
+   208        94     146511.0   1558.6      0.5          h_output = cuda.pagelocked_empty(tuple(trt_ctx.get_binding_shape(1)),
+   209        47        120.0      2.6      0.0                                          dtype=np.float32)
+   210                                           
+   211        94      80208.0    853.3      0.3          h_input_signal = cuda.register_host_memory(
+   212        47       2737.0     58.2      0.0              np.ascontiguousarray(input_features.ravel()))
+   213        47       1315.0     28.0      0.0          cuda.memcpy_htod_async(d_input, h_input_signal, stream)
+   214       141     106691.0    756.7      0.4          trt_ctx.execute_async_v2(bindings=[int(d_input),
+   215        47         67.0      1.4      0.0                                          int(d_output)],
+   216        47        114.0      2.4      0.0                                  stream_handle=stream.handle)
+   217        47        907.0     19.3      0.0          cuda.memcpy_dtoh_async(h_output, d_output, stream)
+   218        47   14917794.0 317399.9     49.5          stream.synchronize()
+   219                                           
+   220        47     413178.0   8791.0      1.4          predictions += torch.tensor(h_output).argmax(dim=-1, keepdim=False)
+   221                                               
+   222         1      16410.0  16410.0      0.1      predictions = torch.stack(predictions)
+   223         1    2092151.0 2092151.0      6.9      hypotheses = ctc_decoder.post_process_predictions([predictions], vocab)
+   224         1          2.0      2.0      0.0      return hypotheses
+
+Total time: 37.4966 s
+File: trt_infer_batch.py
+Function: main at line 226
+
+Line #      Hits         Time  Per Hit   % Time  Line Contents
+==============================================================
+   226                                           @profile
+   227                                           def main():
+   228                                               #onnx_path = sys.argv[1]
+   229                                               #mode = 'fp16'
+   230                                               #trt_path = build_trt_engine(onnx_path, mode)
+   231         1          6.0      6.0      0.0      trt_path = sys.argv[1]
+   232         1          0.0      0.0      0.0      model_args = [
+   233         1          1.0      1.0      0.0          '--model_config', 'examples/asr/configs/quartznet15x5.yaml',
+   234         1          0.0      0.0      0.0          '--load_dir', 'model/english/',
+   235         1          0.0      0.0      0.0          '--lm_path', './language-model/english_4gram_1.2.binary',
+   236         1          1.0      1.0      0.0          '--eval_batch_size', '1',
+   237         1          1.0      1.0      0.0          '--beam_width', '64',
+   238                                                   # '--amp_opt_level', 'O1'
+   239                                               ]
+   240         1       1576.0   1576.0      0.0      parser = get_parser()
+   241         1        715.0    715.0      0.0      args = parser.parse_args(model_args)
+   242         1    2447414.0 2447414.0      6.5      asr_model = ModelASR(args)
+   243                                               # trt_path = sys.argv[1]
+   244         1          5.0      5.0      0.0      json_file = sys.argv[2]
+   245         1          1.0      1.0      0.0      predict_file = sys.argv[3]
+   246         1    4911876.0 4911876.0     13.1      feature_tensors = asr_model.get_features(json_file)
+   247                                               # print(feature_tensors.shape)
+   248                                               # print(feature_tensors)
+   249         1   30130988.0 30130988.0     80.4      transcripts = trt_infer(trt_path, feature_tensors)
+   250         1        117.0    117.0      0.0      with open(predict_file, 'w') as f:
+   251      3001       1742.0      0.6      0.0          for transcript in transcripts:
+   252      3000       2170.0      0.7      0.0              f.write(transcript + '\n')
+
